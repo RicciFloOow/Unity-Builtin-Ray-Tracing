@@ -231,13 +231,13 @@ namespace UniBuiltinHWRT
             ExecuteInitConstraintDeltaPosBuffersKernel(ref m_PBDSimulationPassBuffer, PBDSimulationCS);
             for (int i = 0; i < SolverIteratorCount; i++)
             {
-
                 ExecuteApplyDistanceConstraint(ref m_PBDSimulationPassBuffer, PBDSimulationCS);
                 ExecuteApplyBendingConstraint(ref m_PBDSimulationPassBuffer, PBDSimulationCS);
                 ExecuteCalculateAppliedConstraintsTempPosition(ref m_PBDSimulationPassBuffer, PBDSimulationCS);
                 //
             }
-            ExecuteApplyConstraints(ref m_PBDSimulationPassBuffer, PBDSimulationCS);//需要注意，我们这里更改了碰撞检测的顺序，并且用的碰撞检测模型是极其简陋的(仅为了验证RT布料模拟管线的可行性)
+            ExecuteApplyConstraints(ref m_PBDSimulationPassBuffer, PBDSimulationCS);//注意，我们在这里对顶点与速度做了碰撞"约束"，不过这严格来说并不是正真意义上的约束(主要是environment collision constraint的结果我不是很满意)
+            //还有一点比较可惜的是我们这里没有做self collision constraint(至少在2022.3.+版本下，仅用当前给出的api来做是不太合适的)
             ExecuteCalculateVerticesNormal(ref m_PBDSimulationPassBuffer, PBDSimulationCS);
             //绘制
             if (TargetPBDCloth.Material != null)
