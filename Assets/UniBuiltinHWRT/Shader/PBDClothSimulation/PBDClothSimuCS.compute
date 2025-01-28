@@ -1,0 +1,289 @@
+#pragma kernel InitDynamicVerticesKernel
+#pragma kernel GetVerticesMassKernel
+#pragma kernel InitFixedPointPosKernel
+#pragma kernel GetAnimatedFixedPointPosKernel
+#pragma kernel InitTempPosVelBuffersKernel
+#pragma kernel ApplyExternalForceKernel
+#pragma kernel InitConstraintDeltaPosBuffersKernel
+#pragma kernel ApplyDistanceConstraint
+#pragma kernel ApplyBendingConstraint
+#pragma kernel CalculateAppliedConstraintsTempPosition
+#pragma kernel ApplyConstraints
+#pragma kernel CalculateVerticesNormal
+
+#include "PBDClothInputs.cginc"
+
+[numthreads(64, 1, 1)]
+void InitDynamicVerticesKernel (uint3 id : SV_DispatchThreadID)
+{
+	if (id.x >= _MeshVerticesCount)
+	{
+		return;
+	}
+	PBDGPUFixedWeight fixedWeight = _Mesh_VerticesFixedWeight[id.x];
+	int boneInfoForThisVert = _Mesh_BonesPerVertex[id.x];
+	uint startIndex = boneInfoForThisVert >> 8;
+	uint affectedBonesCount = boneInfoForThisVert & 0x000000FF;
+	//
+	float4x4 blendedMat = 0;
+	for (uint i = 0; i < affectedBonesCount; i++)
+	{
+		BoneWeight1 bw1 = _Mesh_AllBoneWeights[startIndex + i];
+		blendedMat += _Mesh_BonesLocalToWorldBuffer[bw1.BoneIndex] * bw1.Weight;
+	}
+	//
+	float4 pos = mul(blendedMat, float4(fixedWeight.Vertex, 1));
+	RW_Mesh_Dynamic_VerticesBuffer[id.x] = pos.xyz;
+}
+
+[numthreads(64, 1, 1)]
+void GetVerticesMassKernel(uint3 id : SV_DispatchThreadID)
+{
+	if (id.x >= _MeshVerticesCount)
+	{
+		return;
+	}
+	//we calculate vertices masses in runtime because we may adjust the cloth density (we may sample textures to get vertices density: like part of the cloth is wet)
+	int vertTri = _Mesh_TrianglesPerVertex[id.x];
+	uint startIndex = vertTri >> 8;
+	uint vertTriCount = vertTri & 0x000000FF;
+	//
+	float mass = 0;
+	for (uint i = 0; i < vertTriCount; i++)
+	{
+		int tri = _Mesh_AllVertexTriangles[startIndex + i];
+		int v0Index = _Mesh_IndicesBuffer[tri * 3];
+		int v1Index = _Mesh_IndicesBuffer[tri * 3 + 1];
+		int v2Index = _Mesh_IndicesBuffer[tri * 3 + 2];
+		//
+		float3 v0 = _Mesh_Dynamic_VerticesBuffer[v0Index];
+		float3 v1 = _Mesh_Dynamic_VerticesBuffer[v1Index];
+		float3 v2 = _Mesh_Dynamic_VerticesBuffer[v2Index];
+		//sample density textures if needed
+		mass += _MeshDensity * 0.166666666666667 * length(cross(v1 - v0, v2 - v0));//(0.5 * 1 / 3) = 1 / 6
+	}
+	RW_Simu_MassBuffer[id.x] = mass;
+}
+
+[numthreads(64, 1, 1)]
+void InitFixedPointPosKernel (uint3 id : SV_DispatchThreadID)
+{
+	if (id.x >= _MeshVerticesCount)
+	{
+		return;
+	}
+	RW_Mesh_Static_VerticesBuffer[id.x] = 0;
+}
+
+[numthreads(64, 1, 1)]
+void GetAnimatedFixedPointPosKernel (uint3 id : SV_DispatchThreadID)
+{
+	if (id.x >= _MeshVerticesCount)
+	{
+		return;
+	}
+	PBDGPUFixedWeight fixedWeight = _Mesh_VerticesFixedWeight[id.x];
+	int boneInfoForThisVert = _Mesh_BonesPerVertex[id.x];
+	uint startIndex = boneInfoForThisVert >> 8;
+	uint affectedBonesCount = boneInfoForThisVert & 0x000000FF;
+	//
+	float4x4 blendedMat = 0;
+	for (uint i = 0; i < affectedBonesCount; i++)
+	{
+		BoneWeight1 bw1 = _Mesh_AllBoneWeights[startIndex + i];
+		blendedMat += _Mesh_BonesLocalToWorldBuffer[bw1.BoneIndex] * bw1.Weight;
+	}
+	//
+	float4 pos = mul(blendedMat, float4(fixedWeight.Vertex, 1));
+	RW_Mesh_Static_VerticesBuffer[id.x] = float4(pos.xyz, fixedWeight.Weight);
+}
+
+[numthreads(64, 1, 1)]
+void InitTempPosVelBuffersKernel (uint3 id : SV_DispatchThreadID)
+{
+	if (id.x >= _MeshVerticesCount)
+	{
+		return;
+	}
+	RW_Simu_TempVelocityBuffer[id.x] = 0;
+	RW_Simu_TempPositionBuffer[id.x] = 0;
+}
+
+[numthreads(64, 1, 1)]
+void ApplyExternalForceKernel (uint3 id : SV_DispatchThreadID)
+{
+	if (id.x >= _MeshVerticesCount)
+	{
+		return;
+	}
+	float mass = _Simu_MassBuffer[id.x];
+	//calculate vertices acceleration
+	float3 acc = float3(0, -9.8, 0) + _WindForce / mass;//theoretically, it is impossible to have vertices with a mass of 0 here (no degenerate triangle)
+	//
+	float3 vel = _Simu_VelocityBuffer[id.x];
+	float3 pos = _Mesh_Dynamic_VerticesBuffer[id.x];
+	//
+	float3 newVel = vel + _SimuDeltaTime * acc;
+	RW_Simu_TempVelocityBuffer[id.x] = newVel;
+	RW_Simu_TempPositionBuffer[id.x] = pos + _SimuDeltaTime * newVel;
+}
+
+
+[numthreads(64, 1, 1)]
+void InitConstraintDeltaPosBuffersKernel(uint3 id : SV_DispatchThreadID)
+{
+	if (id.x >= _MeshVerticesCount)
+	{
+		return;
+	}
+	RW_Simu_DisConstraintDeltaPosBuffer[id.x] = 0;
+	RW_Simu_BendConstraintDeltaPosBuffer[id.x] = 0;
+}
+
+[numthreads(64, 1, 1)]
+void ApplyDistanceConstraint (uint3 id : SV_DispatchThreadID)
+{
+	if (id.x >= _MeshVerticesCount)
+	{
+		return;
+	}
+	float3 p1 = _Simu_TempPositionBuffer[id.x];
+	float m1 = _Simu_MassBuffer[id.x];
+	uint vertEdges = (uint)_Mesh_EdgesPerVertex[id.x];
+	uint startIndex = vertEdges >> 8;
+	uint vertEdgesCount = vertEdges & 0x000000FF;
+	//
+	float3 dp = 0;
+	for (uint i = 0; i < vertEdgesCount; i++)
+	{
+		PBDEdge vEdge = _Mesh_AllVertexEdges[startIndex + i];
+		float3 p2 = _Simu_TempPositionBuffer[vEdge.Index];
+		float m2 = _Simu_MassBuffer[vEdge.Index];
+		//
+		float3 p1p2 = p1 - p2;
+		float dp1p2 = length(p1p2);
+		dp1p2 = max(10e-16, dp1p2);
+		//
+		dp -= (m2 / (m1 + m2)) * (dp1p2 - vEdge.BaseLength) / dp1p2 * p1p2;
+	}
+	RW_Simu_DisConstraintDeltaPosBuffer[id.x] = _DistanceConstraintStiffness / _SolverIteratorCount * dp;
+}
+
+[numthreads(64, 1, 1)]
+void ApplyBendingConstraint (uint3 id : SV_DispatchThreadID)
+{
+	if (id.x >= _MeshVerticesCount)
+	{
+		return;
+	}
+	float3 p1 = _Simu_TempPositionBuffer[id.x];
+	float m1 = _Simu_MassBuffer[id.x];
+	uint vertSharedEdges = (uint)_Mesh_SharedEdgesPerVertex[id.x];
+	uint startIndex = vertSharedEdges >> 8;
+	uint vertSharedEdgesCount = vertSharedEdges & 0x000000FF;
+	//
+	float3 dp = 0;
+	for (uint i = 0; i < vertSharedEdgesCount; i++)
+	{
+		PBDSharedEdge vSharedEdge = _Mesh_AllVertexSharedEdges[startIndex + i];
+		float3 p2 = _Simu_TempPositionBuffer[vSharedEdge.Index] - p1;
+		float3 p3 = _Simu_TempPositionBuffer[vSharedEdge.LTIndex] - p1;
+		float3 p4 = _Simu_TempPositionBuffer[vSharedEdge.RBIndex] - p1;
+		//
+		float m2 = _Simu_MassBuffer[vSharedEdge.Index];
+		float m3 = _Simu_MassBuffer[vSharedEdge.LTIndex];
+		float m4 = _Simu_MassBuffer[vSharedEdge.RBIndex];
+		//
+		float3 n1 = normalize(cross(p3, p2));
+		float3 n2 = normalize(cross(p4, p2));
+		float d = dot(n1, n2);
+		d = clamp(d, -1, 1);
+		//
+		float dcp23 = 1 / length(cross(p2, p3));
+		float dcp24 = 1 / length(cross(p2, p4));
+		//
+		float3 q3 = (cross(p2, n2) + d * cross(n1, p2)) * dcp23;
+		float3 q4 = (cross(p2, n1) + d * cross(n2, p2)) * dcp24;
+		float3 q2 = -(cross(p3, n2) + d * cross(n1, p3)) * dcp23 - (cross(p4, n1) + d * cross(n2, p4)) * dcp24;
+		float3 q1 = -q2 - q3 - q4;
+		//
+		float sumWq = dot(q1, q1) / m1 + dot(q2, q2) / m2 + dot(q3, q3) / m3 + dot(q4, q4) / m4;
+		sumWq = max(sumWq, 10e-16);
+		//
+		float3 dp1 = (sqrt(1 - d * d) * (acos(d) - vSharedEdge.BaseAngle)) / (m1 * sumWq) * q1;
+		if (all(isfinite(dp1)))
+		{
+			dp -= dp1;
+		}
+	}
+	RW_Simu_BendConstraintDeltaPosBuffer[id.x] = _BendingConstraintStiffness / _SolverIteratorCount * dp;
+}
+
+[numthreads(64, 1, 1)]
+void CalculateAppliedConstraintsTempPosition (uint3 id : SV_DispatchThreadID)
+{
+	if (id.x >= _MeshVerticesCount)
+	{
+		return;
+	}
+	//
+	RW_Simu_TempPositionBuffer[id.x] += _Simu_DisConstraintDeltaPosBuffer[id.x] + _Simu_BendConstraintDeltaPosBuffer[id.x];
+}
+
+[numthreads(64, 1, 1)]
+void ApplyConstraints (uint3 id : SV_DispatchThreadID)
+{
+	if (id.x >= _MeshVerticesCount)
+	{
+		return;
+	}
+	//
+	float4 fixedPoint = _Mesh_Static_VerticesBuffer[id.x];
+	float3 newPos = _Simu_TempPositionBuffer[id.x];
+	float3 oldPos = RW_Mesh_Dynamic_VerticesBuffer[id.x];
+	newPos = lerp(newPos, fixedPoint.xyz, fixedPoint.w);
+	//note that what we do for collision is not a real constraint (like environment collision constraint)
+	ClothCollisionResult ccr = _Simu_CollisionResultBuffer[id.x];
+	float3 vel = _Simu_TempVelocityBuffer[id.x];
+	//
+    if (ccr.HitPoint.w > 0)
+    {
+        RW_Mesh_Dynamic_VerticesBuffer[id.x] = ccr.HitPoint.xyz;
+        float eloss = 0.9f;
+        RW_Simu_VelocityBuffer[id.x] = eloss * reflect(vel, ccr.HitNormal);
+    }
+    else
+	{
+	   	RW_Mesh_Dynamic_VerticesBuffer[id.x] = newPos;
+		RW_Simu_VelocityBuffer[id.x] = (newPos - oldPos) / _SimuDeltaTime;
+	}
+}
+
+[numthreads(64, 1, 1)]
+void CalculateVerticesNormal (uint3 id : SV_DispatchThreadID)
+{
+	if (id.x >= _MeshVerticesCount)
+	{
+		return;
+	}
+	int vertTri = _Mesh_TrianglesPerVertex[id.x];
+	uint startIndex = vertTri >> 8;
+	uint vertTriCount = vertTri & 0x000000FF;
+	//
+	float3 vertNormal = 0;
+	for (uint i = 0; i < vertTriCount; i++)
+	{
+		int tri = _Mesh_AllVertexTriangles[startIndex + i];
+		int v0Index = _Mesh_IndicesBuffer[tri * 3];
+		int v1Index = _Mesh_IndicesBuffer[tri * 3 + 1];
+		int v2Index = _Mesh_IndicesBuffer[tri * 3 + 2];
+		//
+		float3 v0 = _Mesh_Dynamic_VerticesBuffer[v0Index];
+		float3 v1 = _Mesh_Dynamic_VerticesBuffer[v1Index];
+		float3 v2 = _Mesh_Dynamic_VerticesBuffer[v2Index];
+		//
+		vertNormal += normalize(cross(v1 - v0, v2 - v0));
+	}
+	//
+	RW_Mesh_Dynamic_NormalsBuffer[id.x] = normalize(vertNormal);
+}

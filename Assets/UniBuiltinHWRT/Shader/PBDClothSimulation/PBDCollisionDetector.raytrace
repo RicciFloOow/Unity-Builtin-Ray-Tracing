@@ -1,0 +1,85 @@
+#include "PBDClothInputs.cginc"
+
+RaytracingAccelerationStructure _SceneAccelStruct;
+
+#pragma max_recursion_depth 1
+
+#define K_PBDCloth_TestRayLength 0.1
+//this is related to the relative speed and cloth size
+
+[shader("miss")]
+void MissShader(inout RayPayload rayPayload : SV_RayPayload)
+{
+    rayPayload.HitCurrent = K_PBDCloth_TestRayLength;
+    rayPayload.Normal = 0;
+    rayPayload.IsHit = false;
+}
+
+[shader("raygeneration")]
+void PBDVerticesCollisionDetection()
+{
+    uint vertexIndex = DispatchRaysIndex().x;
+    //
+    float3 origin = _Mesh_Dynamic_VerticesBuffer[vertexIndex];
+    //
+    float3 dir = _Mesh_Dynamic_NormalsBuffer[vertexIndex];
+    //
+    RayDesc ray;
+    ray.Origin    = origin;
+    ray.Direction = dir;
+    ray.TMin      = 10e-10;
+    ray.TMax      = K_PBDCloth_TestRayLength;
+    //
+    RayPayload payload;
+    payload.HitCurrent = K_PBDCloth_TestRayLength;
+    payload.Normal = 0;
+    payload.IsHit = false;
+    //
+    RayDesc rayOp;
+    rayOp.Origin    = origin;
+    rayOp.Direction = -dir;
+    rayOp.TMin      = 10e-10;
+    rayOp.TMax      = K_PBDCloth_TestRayLength;
+    //
+    RayPayload payloadOp;
+    payloadOp.HitCurrent = K_PBDCloth_TestRayLength;
+    payloadOp.Normal = -dir;
+    payloadOp.IsHit = false;
+    //
+    uint missShaderIndex = 0;
+    TraceRay(_SceneAccelStruct, 0, 0xFF, 0, 1, missShaderIndex, ray, payload);
+    TraceRay(_SceneAccelStruct, 0, 0xFF, 0, 1, missShaderIndex, rayOp, payloadOp);
+    //
+    ClothCollisionResult ccr = (ClothCollisionResult)0;
+    if (payload.IsHit || payloadOp.IsHit)
+    {
+        float RDotN = dot(dir, payload.Normal);
+        float ROpDotN = -dot(dir, payloadOp.Normal);
+        //
+        float isInner = 1 - step(RDotN, 0);
+        float isInnerOp = 1 - step(ROpDotN, 0);
+        //
+        float nearDir = step(payload.HitCurrent, payloadOp.HitCurrent);
+        if (!payload.IsHit)
+        {
+            nearDir = 1;
+        }
+        else if (!payloadOp.IsHit)
+        {
+            nearDir = 0;
+        }
+        float3 hitNormal = lerp(payload.Normal, payloadOp.Normal, nearDir);
+        //
+        float3 hitPoint = lerp(origin + (payload.HitCurrent + _ClothThickness * lerp(-1, 1, isInner)) * dir, origin - (payloadOp.HitCurrent + _ClothThickness * lerp(-1, 1, isInnerOp)) * dir, nearDir);
+        //
+        float3 temPos = _Simu_TempPositionBuffer[vertexIndex];
+        //
+        ccr.HitPoint = float4(hitPoint, lerp(lerp(0, 0.5, step(0, dot(hitPoint - temPos, hitNormal))), 1, step(0.5, isInner + isInnerOp)));
+        ccr.HitNormal = hitNormal;
+        RW_Simu_CollisionResultBuffer[vertexIndex] = ccr;
+    }
+    else 
+    {
+        RW_Simu_CollisionResultBuffer[vertexIndex] = ccr;
+    }
+}

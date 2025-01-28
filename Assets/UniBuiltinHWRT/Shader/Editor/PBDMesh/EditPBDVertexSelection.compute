@@ -1,0 +1,65 @@
+#pragma kernel EditInitResultKernel
+#pragma kernel EditVertexSelectionKernel
+
+float3 _EditSelectionRayDirection;
+
+float3 _EditVirtualCamera_WorldSpacePos;
+
+uint _EditPBDClothTriangleCount;
+
+StructuredBuffer<float3> _EditPBDSkinnedMeshVerticesBuffer;
+StructuredBuffer<int> _EditPBDSkinnedMeshIndicesBuffer;
+RWStructuredBuffer<int> RW_ResultBuffer;//index 0: for counting
+
+[numthreads(1, 1, 1)]
+void EditInitResultKernel(uint3 id : SV_DispatchThreadID)
+{
+    RW_ResultBuffer[0] = 0;
+}
+
+//ref: https://www.shadertoy.com/view/tl3XRN
+bool RayTriangleDetect(float3 rayDir, float3 rayOrigin, float3 v0, float3 v1, float3 v2)
+{
+    float3 edgeAB = v1 - v0;
+    float3 edgeAC = v2 - v0;
+    //
+	float3 normalVec = cross(edgeAB, edgeAC);
+	float3 ao = rayOrigin - v0;
+	float3 dao = cross(ao, rayDir);
+
+	float determinant = -dot(rayDir, normalVec);
+	float invDet = 1 / determinant;
+
+	float dst = dot(ao, normalVec) * invDet;
+	float u = dot(edgeAC, dao) * invDet;
+	float v = -dot(edgeAB, dao) * invDet;
+	float w = 1 - u - v;
+
+	return dst >= 0 && u >= 0 && v >= 0 && w >= 0;//double side
+}
+
+
+[numthreads(64, 1, 1)]
+void EditVertexSelectionKernel(uint3 id : SV_DispatchThreadID)
+{
+	uint triIndex = id.x;
+	if (triIndex >= _EditPBDClothTriangleCount)
+	{
+		return;
+	}
+	//
+	uint v0Index = _EditPBDSkinnedMeshIndicesBuffer[triIndex * 3];
+	uint v1Index = _EditPBDSkinnedMeshIndicesBuffer[triIndex * 3 + 1];
+	uint v2Index = _EditPBDSkinnedMeshIndicesBuffer[triIndex * 3 + 2];
+	//
+	float3 v0 = _EditPBDSkinnedMeshVerticesBuffer[v0Index];
+	float3 v1 = _EditPBDSkinnedMeshVerticesBuffer[v1Index];
+	float3 v2 = _EditPBDSkinnedMeshVerticesBuffer[v2Index];
+	//
+	if (RayTriangleDetect(_EditSelectionRayDirection, _EditVirtualCamera_WorldSpacePos, v0, v1, v2))
+	{
+		int currentHitIndex = 0;
+		InterlockedAdd(RW_ResultBuffer[0], 1, currentHitIndex);
+		RW_ResultBuffer[currentHitIndex + 1] = (int)triIndex;
+	}
+}

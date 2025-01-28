@@ -1,0 +1,106 @@
+#pragma kernel InitDispatchedFixedPointBufferKernel
+#pragma kernel DispatchToDrawFixedPointKernel
+#pragma kernel IndirectDispatchKernel
+#pragma kernel DrawFixedPointsKernel
+
+#include "../../Lib/UtilLib.cginc"
+//note that: write #pragma warning (disable:3556) here may still not work for disabling editor warning
+//we should put this in an include file, also, we should use #include but not #include_with_pragmas
+
+int _EditPBDSelectVertexIndex;
+
+uint _EditPBDClothVertexCount;
+
+float4x4 _meshObj2WorldMatrix;
+
+float4x4 _EditVirtualCamera_VPMatrix;
+
+Texture2D<float> _VirtualCameraDepth_RT;
+
+StructuredBuffer<int> _EditPBDDispatchedFixedPointBuffer;
+StructuredBuffer<float> _EditPBDClothFixedVertBuffer;
+StructuredBuffer<float3> _EditPBDSkinnedMeshVerticesBuffer;
+RWStructuredBuffer<int> RW_EditPBDDispatchedFixedPointBuffer;
+RWStructuredBuffer<int> RW_EditFixedPointDispatchBuffer;
+
+RWTexture2D<float4> RW_VirtualCameraFixedPoints_RT;
+
+SamplerState sampler_LinearClamp;
+
+[numthreads(1, 1, 1)]
+void InitDispatchedFixedPointBufferKernel (uint3 id : SV_DispatchThreadID)
+{
+    RW_EditPBDDispatchedFixedPointBuffer[0] = 0;
+}
+
+[numthreads(64, 1, 1)]
+void DispatchToDrawFixedPointKernel (uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _EditPBDClothVertexCount || (int)id.x == _EditPBDSelectVertexIndex)
+    {
+        return;
+    }
+    //
+    float vertFixedWeight = _EditPBDClothFixedVertBuffer[id.x];
+    if (vertFixedWeight > 0)
+    {
+        float3 vertex = _EditPBDSkinnedMeshVerticesBuffer[id.x];
+        float4 ndcPos = mul(_EditVirtualCamera_VPMatrix, mul(_meshObj2WorldMatrix, float4(vertex, 1)));
+        //
+        ndcPos.xyz /= ndcPos.w;
+        float2 uv = ndcPos.xy * 0.5 + 0.5;
+        uv.y = 1 - uv.y;
+        //
+        float sampledDepth = _VirtualCameraDepth_RT.SampleLevel(sampler_LinearClamp, uv, 0);
+        //
+        if (ndcPos.z >= 0 && ndcPos.z + 10e-5 >= sampledDepth)
+        {
+            //
+            int currentPointIndex = 0;
+            InterlockedAdd(RW_EditPBDDispatchedFixedPointBuffer[0], 1, currentPointIndex);
+            RW_EditPBDDispatchedFixedPointBuffer[currentPointIndex + 1] = (int)id.x;//TODO:use another buffer to store vertex's ss pos, but not the index of vertex 
+        }
+    }
+}
+
+[numthreads(1, 1, 1)]
+void IndirectDispatchKernel (uint3 id : SV_DispatchThreadID)
+{
+    //we draw a point with 4x4 pixels, hence we draw 4 points in a (8, 8, 1) size group
+    int toDrawVerticesCount = _EditPBDDispatchedFixedPointBuffer[0];
+    int groupCount = max(1, ceil(toDrawVerticesCount / 4));
+    //here we assume the count of fixed points is not greater than 2^22
+    RW_EditFixedPointDispatchBuffer[0] = clamp(groupCount, 1, 1024);
+    RW_EditFixedPointDispatchBuffer[1] = max(1, ceil(groupCount / 1024));
+    RW_EditFixedPointDispatchBuffer[2] = 1;
+}
+
+[numthreads(8, 8, 1)]
+void DrawFixedPointsKernel (uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID)
+{
+    int toDrawVerticesCount = _EditPBDDispatchedFixedPointBuffer[0];
+    //
+    uint2 pDC = id.xy / 4;
+    uint2 pGroupThreadID = pDC % 2;
+    uint pointIndex = pGroupThreadID.x + pGroupThreadID.y * 2 + (gid.x + gid.y * 1024) * 4;
+    //
+    if (pointIndex >= (uint)toDrawVerticesCount)
+    {
+        return;
+    }
+    //if we store ss pos, there is no need for us to calculate the points' ss pos here(but, as I said, this is just a demo ...)
+    int vertexIndex = _EditPBDDispatchedFixedPointBuffer[pointIndex + 1];
+    float3 vertex = _EditPBDSkinnedMeshVerticesBuffer[vertexIndex];
+    float4 ndcPos = mul(_EditVirtualCamera_VPMatrix, mul(_meshObj2WorldMatrix, float4(vertex, 1)));
+    //
+    ndcPos.xyz /= ndcPos.w;
+    float2 centerUV = ndcPos.xy * 0.5 + 0.5;
+    centerUV.y = 1 - centerUV.y;
+    //
+    uint2 pixelPos = id.xy % 4;
+    float2 pixelUV = (pixelPos - 1.5) * 0.5;
+    float alpha = smoothstep(1, 0.75, length(pixelUV));
+    //
+    int2 coord = round(pixelPos - 1.5 + centerUV * float2(1280, 720));
+    RW_VirtualCameraFixedPoints_RT[coord] = float4(0.75, 0.12, 0, alpha);
+}
