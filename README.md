@@ -315,12 +315,6 @@ CPU端的脚本与Renderer的大差不差，除了在手动给`RayTracingAcceler
 
 
 
-> [!WARNING]
->
-> A卡用Instance的光追可能会闪退。
-
-
-
 Instance的光追结果(黄金屋)：
 
 - AABB：40000
@@ -333,9 +327,7 @@ Instance的光追结果(黄金屋)：
 
 > [!NOTE]
 >
-> 虽然我用的RX6600用Instance光追会闪退，但我仍然用8顶点的长方体(一般要区分法线的是24个顶点)作为网格，用Renderer做了测试，与自行实现的软光追相比，结果不尽人意。
-
-
+> 用RX6600在相同条件下运行相同场景：34FPS(HWRT)，14FPS(自行实现的BVH+GPGPU软光追)，10.7FPS(用Unity自带的24个顶点的长方体的Renderer的光追，而RTX4070则是130+FPS)
 
 # 3. 基于PBD的布料模拟
 
