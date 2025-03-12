@@ -333,11 +333,10 @@ Instance的光追结果(黄金屋)：
 
 
 
-需要注意的是碰撞也是一大类约束，是可以细分为更具体的约束的，比如Self Collisions、Environment Collisions等。项目里我们就不考虑Self Collisions了，因为以现在给出的接口我们要做也只能做GPGPU的Self Collisions，而没法做HWRT的。至于Environment Collisions，有三种方案来做碰撞检测(约束是分开做的)：
+需要注意的是碰撞也是一大类约束，是可以细分为更具体的约束的，比如Self Collisions、Environment Collisions等。项目里我们就不考虑Self Collisions了，因为以现在给出的接口我们要做也只能做GPGPU的Self Collisions，而没法做HWRT的。至于Environment Collisions，有两种方案来做碰撞检测(约束是分开做的)：
 
 - 射线-网格(三角形)碰撞检测。
 - 顶点-Instance(简单几何体)碰撞检测。
-- 球体-网格(三角形)碰撞检测。
 
 ## 3.1 碰撞检测
 
